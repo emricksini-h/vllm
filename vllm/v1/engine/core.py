@@ -25,6 +25,7 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import engine_receiver_cache_from_config
 from vllm.tasks import POOLING_TASKS, SupportedTask
+from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.utils.gc_utils import (
     freeze_gc_heap,
@@ -218,6 +219,7 @@ class EngineCore:
         # environment variable overrides after this point)
         enable_envs_cache()
 
+    @instrument(span_name="Prepare model")
     def _initialize_kv_caches(
         self, vllm_config: VllmConfig
     ) -> tuple[int, int, KVCacheConfig]:
@@ -639,6 +641,7 @@ class EngineCoreProc(EngineCore):
 
     ENGINE_CORE_DEAD = b"ENGINE_CORE_DEAD"
 
+    @instrument(span_name="EngineCoreProc init")
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -900,17 +903,27 @@ class EngineCoreProc(EngineCore):
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
-        engine_core: EngineCoreProc | None = None
         try:
             vllm_config: VllmConfig = kwargs["vllm_config"]
             parallel_config: ParallelConfig = vllm_config.parallel_config
             data_parallel = parallel_config.data_parallel_size > 1 or dp_rank > 0
             if data_parallel:
                 parallel_config.data_parallel_rank_local = local_dp_rank
+                maybe_init_worker_tracer(
+                    instrumenting_module_name="vllm.engine_core",
+                    process_kind="engine_core",
+                    process_name=f"EngineCore_DP{dp_rank}",
+                )
                 set_process_title("EngineCore", f"DP{dp_rank}")
             else:
+                maybe_init_worker_tracer(
+                    instrumenting_module_name="vllm.engine_core",
+                    process_kind="engine_core",
+                    process_name="EngineCore",
+                )
                 set_process_title("EngineCore")
             decorate_logs()
+
 
             parallel_config.data_parallel_index = dp_rank
             if data_parallel and vllm_config.model_config.is_moe:
@@ -1466,6 +1479,11 @@ class EngineCoreActorMixin:
         dp_rank: int = 0,
         local_dp_rank: int = 0,
     ):
+        # Initialize tracer for distributed tracing if configured.
+        from vllm.tracing import maybe_init_worker_tracer
+
+        maybe_init_worker_tracer(f"vllm.engine_core.dp{dp_rank}")
+
         self.addresses = addresses
         vllm_config.parallel_config.data_parallel_index = dp_rank
         vllm_config.parallel_config.data_parallel_rank_local = local_dp_rank
