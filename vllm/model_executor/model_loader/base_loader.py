@@ -13,6 +13,7 @@ from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
 )
+from vllm.tracing import instrument
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 logger = init_logger(__name__)
@@ -35,6 +36,7 @@ class BaseModelLoader(ABC):
         inplace weights loading for an already-initialized model"""
         raise NotImplementedError
 
+    @instrument(span_name="Load model")
     def load_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
     ) -> nn.Module:
