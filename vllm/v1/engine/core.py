@@ -924,7 +924,6 @@ class EngineCoreProc(EngineCore):
                 set_process_title("EngineCore")
             decorate_logs()
 
-
             parallel_config.data_parallel_index = dp_rank
             if data_parallel and vllm_config.model_config.is_moe:
                 # Set data parallel rank for this engine process.
