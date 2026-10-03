@@ -8,6 +8,7 @@ and placed at any position in any prompt.
 """
 
 import math
+from collections import OrderedDict
 from collections.abc import Callable
 
 import torch
@@ -76,16 +77,54 @@ def prune_image_embeds(
     pruning_rate: float,
     method: str = "cosine",
     num_scored_channels: int | None = None,
-) -> torch.Tensor:
+    keep: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Prune one image's `(h * w, C)` embeddings into a `(K, C + 2)` entry.
 
-    Survivors stay in raster order. Only the first `num_scored_channels`
-    channels are scored, e.g. to skip Qwen3-VL deepstack features.
+    Returns the entry and the kept indices, in raster order. Only the first
+    `num_scored_channels` channels are scored, e.g. to skip Qwen3-VL deepstack
+    features. Passing `keep` reuses a previous selection.
     """
     grid_h, grid_w = grid_hw
     if embeds.shape[0] != grid_h * grid_w or max(grid_hw) >= MAX_GRID_DIM:
         raise ValueError(f"Invalid grid {grid_hw} for {embeds.shape[0]} embeddings")
-    num_retained = num_retained_image_tokens(embeds.shape[0], pruning_rate)
-    keep = select_retained_tokens(embeds[:, :num_scored_channels], num_retained, method)
+    if keep is None:
+        num_retained = num_retained_image_tokens(embeds.shape[0], pruning_rate)
+        scored = embeds[:, :num_scored_channels]
+        keep = select_retained_tokens(scored, num_retained, method)
     hw = torch.stack((keep // grid_w, keep % grid_w), dim=-1)
-    return pack_retained_positions(embeds[keep], hw)
+    return pack_retained_positions(embeds[keep], hw), keep
+
+
+class ImagePruner:
+    """Prunes image embeddings and remembers each image's kept tokens.
+
+    The encoder output of an image can differ slightly between encodings, which
+    can flip near-ties in the selection. Reusing the first selection keeps a
+    re-encoded image consistent with KV blocks cached from earlier encodings.
+    Kept indices are stored on the CPU, in LRU order.
+    """
+
+    def __init__(self, pruning_rate: float, method: str, max_images: int = 8192):
+        self.pruning_rate = pruning_rate
+        self.method = method
+        self.max_images = max_images
+        self._keep_by_id: OrderedDict[str, torch.Tensor] = OrderedDict()
+
+    def __call__(
+        self,
+        identifier: str,
+        embeds: torch.Tensor,
+        grid_hw: tuple[int, int],
+        num_scored_channels: int | None = None,
+    ) -> torch.Tensor:
+        keep = self._keep_by_id.pop(identifier, None)
+        if keep is not None:
+            keep = keep.to(embeds.device, non_blocking=True).long()
+        entry, keep = prune_image_embeds(
+            embeds, grid_hw, self.pruning_rate, self.method, num_scored_channels, keep
+        )
+        self._keep_by_id[identifier] = keep.int().to("cpu", non_blocking=True)
+        if len(self._keep_by_id) > self.max_images:
+            self._keep_by_id.popitem(last=False)
+        return entry

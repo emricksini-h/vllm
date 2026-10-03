@@ -6,6 +6,7 @@ import torch.nn.functional as F
 
 from vllm.multimodal.image_pruning import (
     MAX_GRID_DIM,
+    ImagePruner,
     num_retained_image_tokens,
     pack_retained_positions,
     prune_image_embeds,
@@ -91,9 +92,10 @@ def test_pack_unpack_roundtrip(dtype):
 def test_prune_image_embeds():
     embeds = _screenshot_like_embeds(5 * 8, dim=32).to(torch.bfloat16)
 
-    out_embeds, hw = unpack_retained_positions(prune_image_embeds(embeds, (5, 8), 0.5))
+    entry, keep = prune_image_embeds(embeds, (5, 8), 0.5)
 
-    keep = select_retained_tokens(embeds, 20)
+    out_embeds, hw = unpack_retained_positions(entry)
+    assert torch.equal(keep, select_retained_tokens(embeds, 20))
     assert torch.equal(out_embeds, embeds[keep])
     assert torch.equal(hw.long(), torch.stack((keep // 8, keep % 8), -1))
 
@@ -106,7 +108,7 @@ def test_prune_image_embeds_scores_leading_channels_only():
     expected = select_retained_tokens(main, 8)
     assert not torch.equal(expected, select_retained_tokens(embeds, 8))
 
-    entry = prune_image_embeds(embeds, (4, 4), 0.5, num_scored_channels=16)
+    entry, _ = prune_image_embeds(embeds, (4, 4), 0.5, num_scored_channels=16)
 
     out_embeds, hw = unpack_retained_positions(entry)
     assert torch.equal(hw[:, 0].long() * 4 + hw[:, 1].long(), expected)
@@ -119,6 +121,24 @@ def test_prune_image_embeds_scores_leading_channels_only():
 def test_prune_image_embeds_rejects_bad_grid(num_tokens, grid_hw):
     with pytest.raises(ValueError, match="Invalid grid"):
         prune_image_embeds(torch.randn(num_tokens, 4), grid_hw, 0.5)
+
+
+def test_image_pruner_reuses_keep_set_per_image():
+    pruner = ImagePruner(pruning_rate=0.5, method="cosine", max_images=2)
+    first, second = (_screenshot_like_embeds(40, dim=32, seed=s) for s in (1, 2))
+    assert not torch.equal(
+        select_retained_tokens(first, 20), select_retained_tokens(second, 20)
+    )
+
+    def kept(identifier, embeds):
+        return unpack_retained_positions(pruner(identifier, embeds, (5, 8)))[1]
+
+    expected = kept("a", first)
+    # A re-encoded image keeps its first selection, even if its embeddings differ.
+    assert torch.equal(kept("a", second), expected)
+    assert not torch.equal(kept("b", second), expected)
+    kept("c", second)  # evicts "a", the least recently used
+    assert not torch.equal(kept("a", second), expected)
 
 
 def test_config_validation():

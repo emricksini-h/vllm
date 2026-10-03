@@ -43,11 +43,10 @@ def test_zero_rate_matches_no_pruning(vllm_runner, image_assets):
 def test_pruned_prefill_is_chunk_invariant(vllm_runner, image_assets, method):
     # Small chunks put prefill boundaries inside the pruned images.
     kwargs = dict(image_pruning_rate=0.5, image_pruning_method=method)
+    chunked = dict(enable_chunked_prefill=True, max_num_batched_tokens=128)
     check_logprobs_close(
         outputs_0_lst=_generate(vllm_runner, image_assets, True, **kwargs),
-        outputs_1_lst=_generate(
-            vllm_runner, image_assets, True, max_num_batched_tokens=128, **kwargs
-        ),
+        outputs_1_lst=_generate(vllm_runner, image_assets, True, **chunked, **kwargs),
         name_0="unchunked",
         name_1="chunked",
     )

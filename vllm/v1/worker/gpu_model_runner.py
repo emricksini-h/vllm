@@ -98,10 +98,7 @@ from vllm.model_executor.offloader import (
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import MultiModalBudget
-from vllm.multimodal.image_pruning import (
-    prune_image_embeds,
-    unpack_retained_positions,
-)
+from vllm.multimodal.image_pruning import ImagePruner, unpack_retained_positions
 from vllm.multimodal.inputs import (
     BatchedTensorInputs,
     MultiModalKwargsItem,
@@ -525,7 +522,7 @@ class GPUModelRunner(
         )
         # These will be overridden in load_model()
         self.is_multimodal_pruning_enabled = False
-        self.image_pruning: tuple[float, str] | None = None  # (rate, method)
+        self.image_pruner: ImagePruner | None = None
         self.requires_sequential_video_encoding = False
         self.max_model_len = model_config.max_model_len
 
@@ -3139,13 +3136,13 @@ class GPUModelRunner(
 
             current_item_idx += num_items
 
-        if self.image_pruning is not None:
+        if self.image_pruner is not None:
             pruning_model = cast(SupportsImagePruning, self.get_model())
             for i, (modality, item) in enumerate(mm_kwargs):
                 if modality == "image":
                     grid_hw, num_scored = pruning_model.get_image_pruning_inputs(item)
-                    encoder_outputs[i] = prune_image_embeds(
-                        encoder_outputs[i], grid_hw, *self.image_pruning, num_scored
+                    encoder_outputs[i] = self.image_pruner(
+                        mm_hashes[i], encoder_outputs[i], grid_hw, num_scored
                     )
 
         # Cache the encoder outputs by mm_hash
@@ -3236,7 +3233,7 @@ class GPUModelRunner(
                     mm_embeds_item = encoder_output[start_idx:end_idx]
 
                 req_start_pos = req_start_idx + start_pos - num_computed_tokens
-                if self.image_pruning is not None and mm_feature.modality == "image":
+                if self.image_pruner is not None and mm_feature.modality == "image":
                     assert is_embed is None
                     mm_embeds_item, hw = unpack_retained_positions(mm_embeds_item)
                     if shift_computed_tokens == 0:  # not for the EAGLE drafter
@@ -5382,9 +5379,8 @@ class GPUModelRunner(
                 )
             if get_pp_group().world_size > 1:
                 raise ValueError("Image pruning does not support pipeline parallelism.")
-            self.image_pruning = (
-                mm_config.image_pruning_rate,
-                mm_config.image_pruning_method,
+            self.image_pruner = ImagePruner(
+                mm_config.image_pruning_rate, mm_config.image_pruning_method
             )
         self.requires_sequential_video_encoding = hasattr(
             self.get_model(), "requires_sequential_video_encoding"
