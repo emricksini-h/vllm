@@ -74,10 +74,12 @@ from vllm.model_executor.model_loader.reload import (
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     MultiModalEmbeddings,
+    SupportsImagePruning,
     SupportsMRoPE,
     SupportsMultiModal,
     get_mixture_of_experts_model,
     supports_eagle3,
+    supports_image_pruning,
     supports_mrope,
     supports_multimodal_pruning,
     supports_realtime,
@@ -96,6 +98,10 @@ from vllm.model_executor.offloader import (
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import MultiModalBudget
+from vllm.multimodal.image_pruning import (
+    prune_image_embeds,
+    unpack_retained_positions,
+)
 from vllm.multimodal.inputs import (
     BatchedTensorInputs,
     MultiModalKwargsItem,
@@ -519,6 +525,7 @@ class GPUModelRunner(
         )
         # These will be overridden in load_model()
         self.is_multimodal_pruning_enabled = False
+        self.image_pruning: tuple[float, str] | None = None  # (rate, method)
         self.requires_sequential_video_encoding = False
         self.max_model_len = model_config.max_model_len
 
@@ -3132,6 +3139,15 @@ class GPUModelRunner(
 
             current_item_idx += num_items
 
+        if self.image_pruning is not None:
+            pruning_model = cast(SupportsImagePruning, self.get_model())
+            for i, (modality, item) in enumerate(mm_kwargs):
+                if modality == "image":
+                    grid_hw, num_scored = pruning_model.get_image_pruning_inputs(item)
+                    encoder_outputs[i] = prune_image_embeds(
+                        encoder_outputs[i], grid_hw, *self.image_pruning, num_scored
+                    )
+
         # Cache the encoder outputs by mm_hash
         for mm_hash, output in zip(mm_hashes, encoder_outputs):
             self._cache_encoder_output(
@@ -3220,6 +3236,14 @@ class GPUModelRunner(
                     mm_embeds_item = encoder_output[start_idx:end_idx]
 
                 req_start_pos = req_start_idx + start_pos - num_computed_tokens
+                if self.image_pruning is not None and mm_feature.modality == "image":
+                    assert is_embed is None
+                    mm_embeds_item, hw = unpack_retained_positions(mm_embeds_item)
+                    if shift_computed_tokens == 0:  # not for the EAGLE drafter
+                        # Image slots hold (base, base, base); write base + (h, w).
+                        dst = req_start_pos + start_idx
+                        slots = self.mrope_positions.gpu[:, dst : dst + len(hw)]
+                        slots[1:] = slots[0] + hw.T
                 # OR mask for overlapping mm_features (use_audio_in_video)
                 if is_embed is None:
                     is_mm_embed[req_start_pos + start_idx : req_start_pos + end_idx] = (
@@ -5351,6 +5375,17 @@ class GPUModelRunner(
             and mm_config is not None
             and mm_config.is_multimodal_pruning_enabled()
         )
+        if mm_config is not None and mm_config.image_pruning_rate is not None:
+            if not (supports_image_pruning(self.get_model()) and self.uses_mrope):
+                raise ValueError(
+                    f"{type(self.get_model()).__name__} does not support image pruning."
+                )
+            if get_pp_group().world_size > 1:
+                raise ValueError("Image pruning does not support pipeline parallelism.")
+            self.image_pruning = (
+                mm_config.image_pruning_rate,
+                mm_config.image_pruning_method,
+            )
         self.requires_sequential_video_encoding = hasattr(
             self.get_model(), "requires_sequential_video_encoding"
         )  # Temporary hack for dynamic res video w/o support for bs>1 yet

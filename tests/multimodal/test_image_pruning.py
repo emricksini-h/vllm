@@ -119,3 +119,34 @@ def test_prune_image_embeds_scores_leading_channels_only():
 def test_prune_image_embeds_rejects_bad_grid(num_tokens, grid_hw):
     with pytest.raises(ValueError, match="Invalid grid"):
         prune_image_embeds(torch.randn(num_tokens, 4), grid_hw, 0.5)
+
+
+def test_config_validation():
+    from vllm.config.multimodal import MultiModalConfig
+
+    assert MultiModalConfig(image_pruning_rate=0.5).image_pruning_method == "cosine"
+    with pytest.raises(ValueError, match="image_pruning_method"):
+        MultiModalConfig(image_pruning_rate=0.5, image_pruning_method="unknown")
+    with pytest.raises(ValueError, match="video_pruning_rate"):
+        MultiModalConfig(image_pruning_rate=0.5, video_pruning_rate=0.5)
+
+
+@pytest.mark.parametrize(
+    ("modality", "rate", "expected"),
+    [
+        ("image", 0.5, "imgprune-cosine-0.5:h"),
+        ("image", None, "h"),
+        ("video", 0.5, "h"),
+    ],
+)
+def test_mm_identifier_includes_pruning_setting(modality, rate, expected):
+    from types import SimpleNamespace
+
+    from vllm.config.multimodal import MultiModalConfig
+    from vllm.v1.engine.input_processor import InputProcessor
+
+    model_config = SimpleNamespace(
+        multimodal_config=MultiModalConfig(image_pruning_rate=rate)
+    )
+    processor = SimpleNamespace(model_config=model_config, lora_config=None)
+    assert InputProcessor._get_mm_identifier(processor, "h", None, modality) == expected

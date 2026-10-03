@@ -264,11 +264,17 @@ class InputProcessor:
         self,
         mm_hash: str,
         lora_request: LoRARequest | None,
+        modality: str,
     ) -> str:
         """When enable_tower_connector_lora is True, multi-modal embeddings
         vary depending on the LoRA request. Therefore, the mm_hash must be
         generated based on the LoRA request to prevent incorrect cache hits.
+        Likewise, pruned image embeddings depend on the pruning settings.
         """
+        mm = self.model_config.multimodal_config
+        if modality == "image" and mm and mm.image_pruning_rate is not None:
+            rate, method = mm.image_pruning_rate, mm.image_pruning_method
+            mm_hash = f"imgprune-{method}-{rate}:{mm_hash}"
         if (
             lora_request is None
             or self.lora_config is None
@@ -491,6 +497,7 @@ class InputProcessor:
                         identifier=self._get_mm_identifier(
                             base_mm_hash,
                             lora_request,
+                            modality,
                         ),
                         mm_position=decoder_mm_positions[modality][idx],
                         mm_hash=base_mm_hash,

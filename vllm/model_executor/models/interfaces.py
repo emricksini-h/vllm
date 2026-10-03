@@ -636,6 +636,27 @@ def supports_multimodal_pruning(
 
 
 @runtime_checkable
+class SupportsImagePruning(Protocol):
+    """Models whose image tokens the model runner can prune after encoding.
+
+    See `vllm/multimodal/image_pruning.py`.
+    """
+
+    supports_image_pruning: ClassVar[Literal[True]] = True
+
+    def get_image_pruning_inputs(
+        self, mm_item: "MultiModalKwargsItem"
+    ) -> tuple[tuple[int, int], int | None]:
+        """The image's (h, w) token grid in the language model, and the number
+        of leading embedding channels to score (`None` for all)."""
+        ...
+
+
+def supports_image_pruning(model: object) -> TypeIs[SupportsImagePruning]:
+    return getattr(model, "supports_image_pruning", False)
+
+
+@runtime_checkable
 class SupportsScoreTemplate(Protocol):
     """The interface required for all models that support score template."""
 

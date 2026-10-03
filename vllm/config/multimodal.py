@@ -437,6 +437,13 @@ class MultiModalConfig:
     - "evs": Efficient Video Sampling.
     - "vidcom2": Video Compression Commander.
     """
+    image_pruning_rate: float | None = Field(default=None, ge=0.0, lt=1.0)
+    """Fraction of each image's tokens to drop after the vision encoder. The
+    survivors keep their original positions. See vllm/multimodal/image_pruning.py.
+    """
+    image_pruning_method: str = "cosine"
+    """How image tokens are scored for pruning, one of `REDUNDANCY_SCORERS` in
+    vllm/multimodal/image_pruning.py."""
     mm_tensor_ipc: MMTensorIPC = "direct_rpc"
     """IPC (inter-process communication) method for multimodal tensors.
     - "direct_rpc": Use msgspec serialization via RPC
@@ -513,6 +520,18 @@ class MultiModalConfig:
 
     @model_validator(mode="after")
     def _validate_multimodal_config(self):
+        if self.image_pruning_rate is not None:
+            from vllm.multimodal.image_pruning import REDUNDANCY_SCORERS
+
+            if self.image_pruning_method not in REDUNDANCY_SCORERS:
+                raise ValueError(
+                    f"'image_pruning_method' must be one of "
+                    f"{list(REDUNDANCY_SCORERS)}, got {self.image_pruning_method!r}."
+                )
+            if self.is_multimodal_pruning_enabled():
+                raise ValueError(
+                    "'image_pruning_rate' cannot be combined with 'video_pruning_rate'."
+                )
         if self.mm_processor_cache_type != "shm" and (
             self.mm_shm_cache_max_object_size_mb
             != MultiModalConfig.mm_shm_cache_max_object_size_mb

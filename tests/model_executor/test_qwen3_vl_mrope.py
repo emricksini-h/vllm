@@ -235,3 +235,40 @@ def test_match_qwen3vl_mrope_evs_on(
     )
 
     assert torch.equal(actual_mrope, expected_mrope_masked)
+
+
+@pytest.mark.parametrize("spatial_merge_size", [1, 2])
+@pytest.mark.parametrize("grid_thw", [[1, 10, 16], [1, 16, 6]])
+@pytest.mark.parametrize("keep_fraction", [0.0, 0.3, 1.0])
+def test_qwen3vl_mrope_pruned_image(spatial_merge_size, grid_thw, keep_fraction):
+    hf_config = DummyConfig()
+    hf_config.vision_config.spatial_merge_size = spatial_merge_size
+    num_full = (grid_thw[1] // spatial_merge_size) * (grid_thw[2] // spatial_merge_size)
+    num_kept = max(1, int(num_full * keep_fraction))
+    prefix = [1, 2, VISION_START_TOKEN_ID]
+    suffix = [VISION_END_TOKEN_ID, 3, 4]
+
+    def mrope(num_image_tokens: int) -> tuple[torch.Tensor, int]:
+        grid = MultiModalFieldElem(data=torch.tensor(grid_thw), field=None)
+        feature = MultiModalFeatureSpec(
+            data=MultiModalKwargsItem({"image_grid_thw": grid}),
+            modality="image",
+            identifier="DUMMY",
+            mm_position=PlaceholderRange(offset=len(prefix), length=num_image_tokens),
+        )
+        return Qwen3VLForConditionalGeneration._get_mrope_input_positions(
+            input_tokens=prefix + [IMAGE_TOKEN_ID] * num_image_tokens + suffix,
+            mm_features=[feature],
+            config=hf_config,
+        )
+
+    full, full_delta = mrope(num_full)
+    pruned, pruned_delta = mrope(num_kept)
+
+    # Text positions and decode positions (context length + delta) are unchanged.
+    n = len(prefix)
+    assert torch.equal(pruned[:, :n], full[:, :n])
+    assert torch.equal(pruned[:, n + num_kept :], full[:, n + num_full :])
+    assert pruned_delta == full_delta + num_full - num_kept
+    # Image slots wait at the image's base position for the model runner's write.
+    assert (pruned[0, n : n + num_kept] == full[0, n]).all()

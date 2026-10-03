@@ -81,6 +81,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.image_pruning import num_retained_image_tokens
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
@@ -127,6 +128,7 @@ from .interfaces import (
     SupportsEagle,
     SupportsEagle3,
     SupportsEncoderCudaGraph,
+    SupportsImagePruning,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
@@ -1608,6 +1610,9 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             assert isinstance(grid_thw, torch.Tensor)
 
             num_tokens = int(grid_thw.prod()) // merge_length
+            pruning_rate = self.info.ctx.get_mm_config().image_pruning_rate
+            if pruning_rate is not None:
+                num_tokens = num_retained_image_tokens(num_tokens, pruning_rate)
             return [hf_processor.image_token_id] * num_tokens
 
         def get_video_replacement_qwen3vl(item_idx: int):
@@ -1860,6 +1865,7 @@ class Qwen3VLForConditionalGeneration(
     SupportsEagle,
     SupportsEagle3,
     SupportsMultiModalPruning,
+    SupportsImagePruning,
 ):
     packed_modules_mapping: dict[str, list[str]] = {
         "qkv_proj": [
@@ -2746,7 +2752,8 @@ class Qwen3VLForConditionalGeneration(
                 assert t == 1, f"Image must have 1 frame, got {t}"
                 llm_grid_h = h // spatial_merge_size
                 llm_grid_w = w // spatial_merge_size
-                yield offset, llm_grid_h, llm_grid_w, llm_grid_h * llm_grid_w
+                # Fewer than h * w placeholders when image tokens are pruned.
+                yield offset, llm_grid_h, llm_grid_w, mm_feature.mm_position.length
             elif mm_feature.modality == "video":
                 grid = data["video_grid_thw"].data
                 assert isinstance(grid, torch.Tensor)
@@ -2798,6 +2805,15 @@ class Qwen3VLForConditionalGeneration(
             mm_features=mm_features,
             config=self.config,
         )
+
+    def get_image_pruning_inputs(
+        self, mm_item: MultiModalKwargsItem
+    ) -> tuple[tuple[int, int], int | None]:
+        vision_config = self.config.vision_config
+        _, h, w = mm_item["image_grid_thw"].data.tolist()
+        merge_size = vision_config.spatial_merge_size
+        # Score the language model input only, not the deepstack features after it.
+        return (h // merge_size, w // merge_size), vision_config.out_hidden_size
 
     @staticmethod
     def _get_mrope_input_positions(
@@ -2860,6 +2876,11 @@ class Qwen3VLForConditionalGeneration(
                 # Normal case: frame has exactly the expected tokens (after actual EVS
                 # pruning).
                 grid_indices = np.indices((1, llm_grid_h, llm_grid_w)).reshape(3, -1)
+                if actual_num_tokens < expected_tokens_per_frame:
+                    # Pruned image: the model runner writes the survivors' (h, w).
+                    # Keeping the grid's last position as the last slot makes the
+                    # following text start where it would without pruning.
+                    grid_indices = grid_indices[:, [0] * (actual_num_tokens - 1) + [-1]]
                 llm_pos_ids_list.append(grid_indices + text_len + st_idx)
 
             st = offset + actual_num_tokens

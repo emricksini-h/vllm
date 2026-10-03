@@ -441,6 +441,8 @@ class ModelConfig:
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
     video_pruning_method: InitVar[str | None] = None
+    image_pruning_rate: InitVar[float | None] = None
+    image_pruning_method: InitVar[str | None] = None
     mm_tensor_ipc: InitVar[MMTensorIPC] = None
     mm_ipc_gpu_memory_gb: InitVar[float | None] = None
     mm_device_do_normalize: InitVar[bool | None] = None
@@ -573,6 +575,8 @@ class ModelConfig:
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
         video_pruning_method: str | None,
+        image_pruning_rate: float | None,
+        image_pruning_method: str | None,
         mm_tensor_ipc: MMTensorIPC,
         mm_ipc_gpu_memory_gb: float | None,
         mm_device_do_normalize: bool | None,
@@ -846,6 +850,8 @@ class ModelConfig:
                 skip_mm_profiling=skip_mm_profiling,
                 video_pruning_rate=video_pruning_rate,
                 video_pruning_method=video_pruning_method,
+                image_pruning_rate=image_pruning_rate,
+                image_pruning_method=image_pruning_method,
                 mm_tensor_ipc=mm_tensor_ipc,
                 mm_ipc_gpu_memory_gb=mm_ipc_gpu_memory_gb,
                 mm_device_do_normalize=self._resolve_mm_device_do_normalize(
