@@ -82,6 +82,7 @@ from vllm.model_executor.layers.rotary_embedding.common import (
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.image_pruning import num_retained_image_tokens
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
@@ -111,6 +112,7 @@ from ..layers.activation import SiluAndMul
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsEncoderCudaGraph,
+    SupportsImagePruning,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
@@ -1692,6 +1694,9 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             assert isinstance(grid_thw, torch.Tensor)
 
             num_tokens = int(grid_thw.prod()) // merge_length
+            pruning_rate = self.info.ctx.get_mm_config().image_pruning_rate
+            if pruning_rate is not None:
+                num_tokens = num_retained_image_tokens(num_tokens, pruning_rate)
             return [hf_processor.image_token_id] * num_tokens
 
         def get_video_replacement(item_idx: int):
@@ -1740,6 +1745,7 @@ class Glm4vForConditionalGeneration(
     SupportsLoRA,
     SupportsPP,
     SupportsMRoPE,
+    SupportsImagePruning,
 ):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -2233,7 +2239,7 @@ class Glm4vForConditionalGeneration(
 
     def iter_mm_grid_thw(
         self, mm_features: list[MultiModalFeatureSpec]
-    ) -> Iterator[tuple[int, int, int, int]]:
+    ) -> Iterator[tuple[int, int, int, int, int]]:
         hf_config = self.config
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
         for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
@@ -2249,8 +2255,16 @@ class Glm4vForConditionalGeneration(
                 assert t == 1, f"Image must have 1 frame, got {t}"
                 assert len(embed_ranges) == 1
                 offset, end = embed_ranges[0]
-                assert end - offset + 1 == h * w // spatial_merge_size**2
-                yield offset, t, h // spatial_merge_size, w // spatial_merge_size
+                # Fewer than h * w placeholders when image tokens are pruned.
+                num_tokens = end - offset + 1
+                assert num_tokens <= h * w // spatial_merge_size**2
+                yield (
+                    offset,
+                    t,
+                    h // spatial_merge_size,
+                    w // spatial_merge_size,
+                    num_tokens,
+                )
             elif mm_feature.modality == "video":
                 feature_data = mm_feature.data
                 assert feature_data is not None
@@ -2266,10 +2280,10 @@ class Glm4vForConditionalGeneration(
                 if len(embed_ranges) == t:
                     for offset, end in embed_ranges:
                         assert end - offset + 1 == num_tokens_per_frame
-                        yield offset, 1, llm_grid_h, llm_grid_w
+                        yield offset, 1, llm_grid_h, llm_grid_w, num_tokens_per_frame
                 else:
                     offset = mm_feature.mm_position.offset
-                    yield offset, t, llm_grid_h, llm_grid_w
+                    yield offset, t, llm_grid_h, llm_grid_w, t * num_tokens_per_frame
             else:
                 raise ValueError(f"Unsupported modality: {mm_feature.modality}")
 
@@ -2285,6 +2299,7 @@ class Glm4vForConditionalGeneration(
             llm_grid_t,
             llm_grid_h,
             llm_grid_w,
+            num_tokens,
         ) in self.iter_mm_grid_thw(mm_features):
             text_len = offset - st
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
@@ -2294,8 +2309,13 @@ class Glm4vForConditionalGeneration(
             grid_indices = np.indices((llm_grid_t, llm_grid_h, llm_grid_w)).reshape(
                 3, -1
             )
+            if num_tokens < grid_indices.shape[1]:
+                # Pruned image: the model runner writes the survivors' (h, w).
+                # Keeping the grid's last position as the last slot makes the
+                # following text start where it would without pruning.
+                grid_indices = grid_indices[:, [0] * (num_tokens - 1) + [-1]]
             llm_pos_ids_list.append(grid_indices + text_len + st_idx)
-            st = offset + llm_grid_t * llm_grid_h * llm_grid_w
+            st = offset + num_tokens
 
         if st < len(input_tokens):
             text_len = len(input_tokens) - st
@@ -2307,6 +2327,15 @@ class Glm4vForConditionalGeneration(
         llm_positions = np.concatenate(llm_pos_ids_list, axis=1).reshape(3, -1)
         mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
         return torch.from_numpy(llm_positions), mrope_position_delta
+
+    def get_image_pruning_inputs(
+        self, mm_item: MultiModalKwargsItem
+    ) -> tuple[tuple[int, int], int | None]:
+        grid = mm_item["image_grid_thw"].data
+        assert isinstance(grid, torch.Tensor)
+        _, h, w = grid.tolist()
+        merge_size = self.config.vision_config.spatial_merge_size
+        return (h // merge_size, w // merge_size), None
 
     def forward(
         self,

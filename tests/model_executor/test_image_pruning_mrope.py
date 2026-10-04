@@ -6,6 +6,7 @@ import pytest
 import torch
 from torch import nn
 
+from vllm.model_executor.models.glm4_1v import Glm4vForConditionalGeneration
 from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -17,13 +18,14 @@ from vllm.multimodal.inputs import (
 IMAGE_TOKEN_ID = 999
 
 
+@pytest.mark.parametrize(
+    "model_cls", [Qwen2_5_VLForConditionalGeneration, Glm4vForConditionalGeneration]
+)
 @pytest.mark.parametrize("spatial_merge_size", [1, 2])
 @pytest.mark.parametrize("grid_thw", [[1, 10, 16], [1, 16, 6]])
 @pytest.mark.parametrize("keep_fraction", [0.0, 0.3, 1.0])
-def test_qwen2_5_vl_mrope_pruned_image(spatial_merge_size, grid_thw, keep_fraction):
-    model = Qwen2_5_VLForConditionalGeneration.__new__(
-        Qwen2_5_VLForConditionalGeneration
-    )
+def test_mrope_pruned_image(model_cls, spatial_merge_size, grid_thw, keep_fraction):
+    model = model_cls.__new__(model_cls)
     nn.Module.__init__(model)
     model.config = SimpleNamespace(
         vision_config=SimpleNamespace(spatial_merge_size=spatial_merge_size)
