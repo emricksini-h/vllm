@@ -14,6 +14,7 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
 from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
     ECSharedRegion,
 )
+from vllm.multimodal.image_pruning import NUM_POSITION_CHANNELS
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -82,12 +83,23 @@ def _get_encoder_cache_hidden_dim(vllm_config: "VllmConfig") -> int:
     vision_config = (
         getattr(hf_config, "vision_config", None) if hf_config is not None else None
     )
+    hidden_dim = model_config.get_inputs_embeds_size()
     if vision_config is not None:
         out_hidden_size = getattr(vision_config, "out_hidden_size", None)
         deepstack_indexes = getattr(vision_config, "deepstack_visual_indexes", None)
         if out_hidden_size is not None and deepstack_indexes:
-            return out_hidden_size * (1 + len(deepstack_indexes))
-    return model_config.get_inputs_embeds_size()
+            hidden_dim = out_hidden_size * (1 + len(deepstack_indexes))
+    mm_config = model_config.multimodal_config
+    if mm_config is not None and mm_config.image_pruning_rate is not None:
+        # Pruned image entries also carry the survivors' (h, w), which video
+        # entries lack, so both can't share one entry width.
+        if mm_config.get_limit_per_prompt("video") > 0:
+            raise ValueError(
+                "Image pruning with an EC connector requires disabling video "
+                "inputs (--limit-mm-per-prompt '{\"video\": 0}')."
+            )
+        hidden_dim += NUM_POSITION_CHANNELS
+    return hidden_dim
 
 
 def create_ec_shared_region(vllm_config: "VllmConfig") -> ECSharedRegion:

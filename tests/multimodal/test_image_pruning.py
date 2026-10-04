@@ -194,3 +194,28 @@ def test_maybe_create_image_pruner():
         maybe_create_image_pruner(config(0.5), object())
     with pytest.raises(ValueError, match="pipeline parallelism"):
         maybe_create_image_pruner(config(0.5, pp=2), supported)
+
+
+def test_ec_entry_width_includes_position_channels():
+    from types import SimpleNamespace
+
+    from vllm.config.multimodal import MultiModalConfig
+    from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
+        _get_encoder_cache_hidden_dim,
+    )
+    from vllm.multimodal.image_pruning import NUM_POSITION_CHANNELS
+
+    def config(rate, limits):
+        mm_config = MultiModalConfig(image_pruning_rate=rate, limit_per_prompt=limits)
+        model_config = SimpleNamespace(
+            hf_config=None,
+            get_inputs_embeds_size=lambda: 64,
+            multimodal_config=mm_config,
+        )
+        return SimpleNamespace(model_config=model_config)
+
+    assert _get_encoder_cache_hidden_dim(config(None, {})) == 64
+    width = _get_encoder_cache_hidden_dim(config(0.5, {"video": 0}))
+    assert width == 64 + NUM_POSITION_CHANNELS
+    with pytest.raises(ValueError, match="disabling video"):
+        _get_encoder_cache_hidden_dim(config(0.5, {}))
