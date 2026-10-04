@@ -321,6 +321,9 @@ class Exaone4_5_ProcessingInfo(Qwen2VLProcessingInfo):
     dummy_inputs=Exaone4_5_DummyInputsBuilder,
 )
 class Exaone4_5_ForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
+    # Its processor emits unpruned image placeholders.
+    supports_image_pruning = False  # type: ignore[assignment]
+
     hf_to_vllm_mapper = Qwen2_5_VLForConditionalGeneration.hf_to_vllm_mapper | (
         WeightsMapper(orig_to_new_prefix={"mtp.": None})
     )

@@ -201,6 +201,9 @@ class OpenCUADummyInputsBuilder(_OpenCUADummyInputsBuilderBase):
     dummy_inputs=OpenCUADummyInputsBuilder,
 )
 class OpenCUAForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
+    # Its processor emits unpruned image placeholders.
+    supports_image_pruning = False  # type: ignore[assignment]
+
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],

@@ -73,6 +73,7 @@ from vllm.model_executor.layers.rotary_embedding.common import (
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.image_pruning import num_retained_image_tokens
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
@@ -103,6 +104,7 @@ from .interfaces import (
     SupportsEagle,
     SupportsEagle3,
     SupportsEncoderCudaGraph,
+    SupportsImagePruning,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
@@ -1274,6 +1276,9 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
                 )
             # End of EVS-specific code
 
+            pruning_rate = self.info.ctx.get_mm_config().image_pruning_rate
+            if modality == "image" and pruning_rate is not None:
+                num_tokens = num_retained_image_tokens(num_tokens, pruning_rate)
             return [placeholder[modality]] * num_tokens
 
         return [
@@ -1301,6 +1306,7 @@ class Qwen2_5_VLForConditionalGeneration(
     SupportsEagle,
     SupportsEagle3,
     SupportsMultiModalPruning,
+    SupportsImagePruning,
     SupportsMRoPE,
 ):
     packed_modules_mapping = {
@@ -1327,14 +1333,15 @@ class Qwen2_5_VLForConditionalGeneration(
 
     def iter_mm_grid_thw(
         self, mm_features: list[MultiModalFeatureSpec]
-    ) -> Iterator[tuple[int, int, int, int, float]]:
+    ) -> Iterator[tuple[int, int, int, int, float, int]]:
         """Iterate over multimodal features and yield grid information.
 
         Args:
             mm_features: List of multimodal feature specifications
 
         Yields:
-            Tuple of (offset, grid_t, grid_h, grid_w, t_factor) for each frame/image
+            Tuple of (offset, grid_t, grid_h, grid_w, t_factor, num_tokens) for each
+            video/image
 
         """
         spatial_merge_size = self.config.vision_config.spatial_merge_size
@@ -1348,7 +1355,11 @@ class Qwen2_5_VLForConditionalGeneration(
                 assert isinstance(grid, torch.Tensor)
                 t, h, w = grid.tolist()
                 assert t == 1, f"Image must have 1 frame, got {t}"
-                yield offset, 1, h // spatial_merge_size, w // spatial_merge_size, 1.0
+                llm_grid_h = h // spatial_merge_size
+                llm_grid_w = w // spatial_merge_size
+                # Fewer than h * w placeholders when image tokens are pruned.
+                num_tokens = mm_feature.mm_position.length
+                yield offset, 1, llm_grid_h, llm_grid_w, 1.0, num_tokens
             elif mm_feature.modality == "video":
                 grid = data["video_grid_thw"].data
                 assert isinstance(grid, torch.Tensor)
@@ -1364,6 +1375,7 @@ class Qwen2_5_VLForConditionalGeneration(
                     h // spatial_merge_size,
                     w // spatial_merge_size,
                     t_factor,
+                    t * (h // spatial_merge_size) * (w // spatial_merge_size),
                 )
             else:
                 raise ValueError(f"Unsupported modality: {mm_feature.modality}")
@@ -1382,6 +1394,7 @@ class Qwen2_5_VLForConditionalGeneration(
             llm_grid_h,
             llm_grid_w,
             t_factor,
+            num_tokens,
         ) in self.iter_mm_grid_thw(mm_features):
             text_len = offset - st
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
@@ -1392,8 +1405,14 @@ class Qwen2_5_VLForConditionalGeneration(
             grid_indices = np.indices((llm_grid_t, llm_grid_h, llm_grid_w))
             if t_factor != 1.0:
                 grid_indices[0] = (grid_indices[0] * t_factor).astype(np.int64)
-            llm_pos_ids_list.append(grid_indices.reshape(3, -1) + text_len + st_idx)
-            st = offset + llm_grid_t * llm_grid_h * llm_grid_w
+            grid_indices = grid_indices.reshape(3, -1)
+            if num_tokens < grid_indices.shape[1]:
+                # Pruned image: the model runner writes the survivors' (h, w).
+                # Keeping the grid's last position as the last slot makes the
+                # following text start where it would without pruning.
+                grid_indices = grid_indices[:, [0] * (num_tokens - 1) + [-1]]
+            llm_pos_ids_list.append(grid_indices + text_len + st_idx)
+            st = offset + num_tokens
 
         if st < len(input_tokens):
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
@@ -1406,6 +1425,15 @@ class Qwen2_5_VLForConditionalGeneration(
         mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
 
         return torch.from_numpy(llm_positions), mrope_position_delta
+
+    def get_image_pruning_inputs(
+        self, mm_item: MultiModalKwargsItem
+    ) -> tuple[tuple[int, int], int | None]:
+        grid = mm_item["image_grid_thw"].data
+        assert isinstance(grid, torch.Tensor)
+        _, h, w = grid.tolist()
+        merge_size = self.config.vision_config.spatial_merge_size
+        return (h // merge_size, w // merge_size), None
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:

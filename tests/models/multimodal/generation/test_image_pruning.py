@@ -6,7 +6,10 @@ import pytest
 
 from ...utils import check_logprobs_close, check_outputs_equal
 
-MODEL = "Qwen/Qwen3-VL-2B-Instruct"  # has deepstack features
+MODELS = [
+    "Qwen/Qwen3-VL-2B-Instruct",  # has deepstack features
+    "Qwen/Qwen2.5-VL-3B-Instruct",
+]
 PROMPT = (
     "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
     "Describe the image.<|im_end|>\n<|im_start|>assistant\n"
@@ -18,11 +21,11 @@ def model_runner(request, monkeypatch):
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(request.param == "v2")))
 
 
-def _generate(vllm_runner, image_assets, logprobs: bool, **kwargs):
+def _generate(vllm_runner, image_assets, model, logprobs: bool, **kwargs):
     images = [asset.pil_image for asset in image_assets]
     prompts = [PROMPT] * len(images)
     with vllm_runner(
-        MODEL, max_model_len=4096, limit_mm_per_prompt={"image": 1}, **kwargs
+        model, max_model_len=4096, limit_mm_per_prompt={"image": 1}, **kwargs
     ) as llm:
         if logprobs:
             return llm.generate_greedy_logprobs(prompts, 32, 5, images=images)
@@ -30,13 +33,14 @@ def _generate(vllm_runner, image_assets, logprobs: bool, **kwargs):
 
 
 @pytest.mark.core_model
-def test_zero_rate_matches_no_pruning(vllm_runner, image_assets):
+@pytest.mark.parametrize("model", MODELS)
+def test_zero_rate_matches_no_pruning(vllm_runner, image_assets, model):
     # Rate 0 runs the whole pruning path (selection, packing, position writes)
     # while keeping every token, so outputs must not change.
     check_outputs_equal(
-        outputs_0_lst=_generate(vllm_runner, image_assets, False),
+        outputs_0_lst=_generate(vllm_runner, image_assets, model, False),
         outputs_1_lst=_generate(
-            vllm_runner, image_assets, False, image_pruning_rate=0.0
+            vllm_runner, image_assets, model, False, image_pruning_rate=0.0
         ),
         name_0="no_pruning",
         name_1="rate_0",
@@ -44,14 +48,17 @@ def test_zero_rate_matches_no_pruning(vllm_runner, image_assets):
 
 
 @pytest.mark.core_model
+@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("method", ["cosine", "random"])
-def test_pruned_prefill_is_chunk_invariant(vllm_runner, image_assets, method):
+def test_pruned_prefill_is_chunk_invariant(vllm_runner, image_assets, model, method):
     # Small chunks put prefill boundaries inside the pruned images.
     kwargs = dict(image_pruning_rate=0.5, image_pruning_method=method)
     chunked = dict(enable_chunked_prefill=True, max_num_batched_tokens=128)
     check_logprobs_close(
-        outputs_0_lst=_generate(vllm_runner, image_assets, True, **kwargs),
-        outputs_1_lst=_generate(vllm_runner, image_assets, True, **chunked, **kwargs),
+        outputs_0_lst=_generate(vllm_runner, image_assets, model, True, **kwargs),
+        outputs_1_lst=_generate(
+            vllm_runner, image_assets, model, True, **chunked, **kwargs
+        ),
         name_0="unchunked",
         name_1="chunked",
     )
