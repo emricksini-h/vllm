@@ -13,6 +13,11 @@ PROMPT = (
 )
 
 
+@pytest.fixture(autouse=True, params=["v1", "v2"])
+def model_runner(request, monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(request.param == "v2")))
+
+
 def _generate(vllm_runner, image_assets, logprobs: bool, **kwargs):
     images = [asset.pil_image for asset in image_assets]
     prompts = [PROMPT] * len(images)

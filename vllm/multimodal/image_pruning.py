@@ -10,9 +10,15 @@ and placed at any position in any prompt.
 import math
 from collections import OrderedDict
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+    from vllm.model_executor.models.interfaces import SupportsImagePruning
+    from vllm.multimodal.inputs import MultiModalKwargsItem
 
 NUM_POSITION_CHANNELS = 2
 # Coordinates are stored as integer bit patterns of the embedding dtype; values
@@ -128,3 +134,35 @@ class ImagePruner:
         if len(self._keep_by_id) > self.max_images:
             self._keep_by_id.popitem(last=False)
         return entry
+
+    def prune_encoder_outputs(
+        self,
+        model: "SupportsImagePruning",
+        identifiers: list[str],
+        mm_kwargs: list[tuple[str, "MultiModalKwargsItem"]],
+        encoder_outputs: list[torch.Tensor],
+    ) -> None:
+        """Prune, in place, the image entries of a batch of encoder outputs."""
+        for i, (modality, item) in enumerate(mm_kwargs):
+            if modality == "image":
+                grid_hw, num_scored = model.get_image_pruning_inputs(item)
+                encoder_outputs[i] = self(
+                    identifiers[i], encoder_outputs[i], grid_hw, num_scored
+                )
+
+
+def maybe_create_image_pruner(
+    vllm_config: "VllmConfig", model: object
+) -> ImagePruner | None:
+    """Return an `ImagePruner` if image pruning is enabled and supported."""
+    from vllm.model_executor.models.interfaces import supports_image_pruning
+
+    model_config = vllm_config.model_config
+    mm_config = model_config.multimodal_config
+    if mm_config is None or mm_config.image_pruning_rate is None:
+        return None
+    if not (supports_image_pruning(model) and model_config.uses_mrope):
+        raise ValueError(f"{type(model).__name__} does not support image pruning.")
+    if vllm_config.parallel_config.pipeline_parallel_size > 1:
+        raise ValueError("Image pruning does not support pipeline parallelism.")
+    return ImagePruner(mm_config.image_pruning_rate, mm_config.image_pruning_method)

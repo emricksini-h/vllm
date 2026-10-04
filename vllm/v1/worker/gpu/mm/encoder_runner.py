@@ -12,6 +12,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_realtime
 from vllm.multimodal.encoder_budget import MultiModalBudget
+from vllm.multimodal.image_pruning import ImagePruner, unpack_retained_positions
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.utils import (
     get_mm_features_in_window,
@@ -42,6 +43,7 @@ class EncoderRunner:
         device: torch.device,
         cudagraph_manager: "EncoderCudaGraphManager | None" = None,
         enable_timing: bool = False,
+        image_pruner: ImagePruner | None = None,
     ):
         self.model = model
         self.max_num_tokens = max_num_tokens
@@ -52,6 +54,9 @@ class EncoderRunner:
         self.is_realtime = supports_realtime(model)
         self.cudagraph_manager = cudagraph_manager
         self.enable_timing = enable_timing
+        self.image_pruner = image_pruner
+        # (batch index, prompt position, (h, w)) of the last gather's pruned images.
+        self.pruned_image_positions: list[tuple[int, int, torch.Tensor]] = []
         self.encoder_timing_registry: dict[str, EncoderTimingStats] = {}
         self._timing_lock = threading.Lock()
 
@@ -213,6 +218,7 @@ class EncoderRunner:
     ) -> tuple[list[torch.Tensor], torch.Tensor]:
         if draft_lookahead:
             num_computed_tokens = num_computed_tokens + draft_lookahead
+        self.pruned_image_positions = []
 
         is_mm_embed = torch.zeros(
             total_num_scheduled_tokens,
@@ -278,6 +284,10 @@ class EncoderRunner:
                     mm_embeds_item = encoder_output[curr_embeds_start:curr_embeds_end]
                 else:
                     mm_embeds_item = encoder_output[start_idx:end_idx]
+                if self.image_pruner is not None and mm_feature.modality == "image":
+                    assert is_embed is None
+                    mm_embeds_item, hw = unpack_retained_positions(mm_embeds_item)
+                    self.pruned_image_positions.append((i, start_pos + start_idx, hw))
 
                 # Attach modality for Omni interleaved merge (collected on demand).
                 set_mm_embedding_modality(mm_embeds_item, mm_feature.modality)

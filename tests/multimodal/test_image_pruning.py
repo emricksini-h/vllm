@@ -170,3 +170,27 @@ def test_mm_identifier_includes_pruning_setting(modality, rate, expected):
     )
     processor = SimpleNamespace(model_config=model_config, lora_config=None)
     assert InputProcessor._get_mm_identifier(processor, "h", None, modality) == expected
+
+
+def test_maybe_create_image_pruner():
+    from types import SimpleNamespace
+
+    from vllm.config.multimodal import MultiModalConfig
+    from vllm.multimodal.image_pruning import maybe_create_image_pruner
+
+    def config(rate, uses_mrope=True, pp=1):
+        model_config = SimpleNamespace(
+            multimodal_config=MultiModalConfig(image_pruning_rate=rate),
+            uses_mrope=uses_mrope,
+        )
+        parallel = SimpleNamespace(pipeline_parallel_size=pp)
+        return SimpleNamespace(model_config=model_config, parallel_config=parallel)
+
+    supported = SimpleNamespace(supports_image_pruning=True)
+    assert maybe_create_image_pruner(config(None), object()) is None
+    pruner = maybe_create_image_pruner(config(0.5), supported)
+    assert pruner is not None and pruner.pruning_rate == 0.5
+    with pytest.raises(ValueError, match="does not support image pruning"):
+        maybe_create_image_pruner(config(0.5), object())
+    with pytest.raises(ValueError, match="pipeline parallelism"):
+        maybe_create_image_pruner(config(0.5, pp=2), supported)

@@ -79,7 +79,6 @@ from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     get_mixture_of_experts_model,
     supports_eagle3,
-    supports_image_pruning,
     supports_mrope,
     supports_multimodal_pruning,
     supports_realtime,
@@ -98,7 +97,11 @@ from vllm.model_executor.offloader import (
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import MultiModalBudget
-from vllm.multimodal.image_pruning import ImagePruner, unpack_retained_positions
+from vllm.multimodal.image_pruning import (
+    ImagePruner,
+    maybe_create_image_pruner,
+    unpack_retained_positions,
+)
 from vllm.multimodal.inputs import (
     BatchedTensorInputs,
     MultiModalKwargsItem,
@@ -3137,13 +3140,12 @@ class GPUModelRunner(
             current_item_idx += num_items
 
         if self.image_pruner is not None:
-            pruning_model = cast(SupportsImagePruning, self.get_model())
-            for i, (modality, item) in enumerate(mm_kwargs):
-                if modality == "image":
-                    grid_hw, num_scored = pruning_model.get_image_pruning_inputs(item)
-                    encoder_outputs[i] = self.image_pruner(
-                        mm_hashes[i], encoder_outputs[i], grid_hw, num_scored
-                    )
+            self.image_pruner.prune_encoder_outputs(
+                cast(SupportsImagePruning, self.get_model()),
+                mm_hashes,
+                mm_kwargs,
+                encoder_outputs,
+            )
 
         # Cache the encoder outputs by mm_hash
         for mm_hash, output in zip(mm_hashes, encoder_outputs):
@@ -5372,16 +5374,9 @@ class GPUModelRunner(
             and mm_config is not None
             and mm_config.is_multimodal_pruning_enabled()
         )
-        if mm_config is not None and mm_config.image_pruning_rate is not None:
-            if not (supports_image_pruning(self.get_model()) and self.uses_mrope):
-                raise ValueError(
-                    f"{type(self.get_model()).__name__} does not support image pruning."
-                )
-            if get_pp_group().world_size > 1:
-                raise ValueError("Image pruning does not support pipeline parallelism.")
-            self.image_pruner = ImagePruner(
-                mm_config.image_pruning_rate, mm_config.image_pruning_method
-            )
+        self.image_pruner = maybe_create_image_pruner(
+            self.vllm_config, self.get_model()
+        )
         self.requires_sequential_video_encoding = hasattr(
             self.get_model(), "requires_sequential_video_encoding"
         )  # Temporary hack for dynamic res video w/o support for bs>1 yet

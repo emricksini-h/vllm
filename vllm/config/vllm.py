@@ -3091,10 +3091,6 @@ class VllmConfig:
         if self.parallel_config.use_ubatching:
             unsupported.extend(self._get_dbo_unsupported_features())
 
-        mm_config = self.model_config.multimodal_config if self.model_config else None
-        if mm_config is not None and mm_config.image_pruning_rate is not None:
-            unsupported.append("image pruning")
-
         return unsupported
 
     def _get_v1_model_runner_unsupported_features(self) -> list[str]:

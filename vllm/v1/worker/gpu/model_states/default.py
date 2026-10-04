@@ -111,6 +111,14 @@ class DefaultModelState(ModelState):
             self.execute_mm_encoder(scheduled_encoder_inputs)
 
             mm_embeds, is_mm_embed = super().gather_mm_embeddings(input_batch)
+            if self.encoder_runner.pruned_image_positions:
+                assert self.rope_state is not None
+                for batch_idx, start, hw in self.encoder_runner.pruned_image_positions:
+                    req_idx = int(input_batch.idx_mapping_np[batch_idx])
+                    end = start + hw.shape[0]
+                    # Image slots hold (base, base, base); write base + (h, w).
+                    slots = self.rope_state.read_prefill_positions(req_idx, end)
+                    slots[1:, start:] = slots[0, start:] + hw.T
             if self.mm_pruner is not None and mm_embeds:
                 # EVS: recompute mrope positions for pruned media.
                 mm_embeds = self.mm_pruner.recompute(mm_embeds, input_batch, req_states)

@@ -10,8 +10,10 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.models.interfaces import (
     SupportsEncoderCudaGraph,
+    SupportsImagePruning,
     supports_encoder_cudagraph,
 )
+from vllm.multimodal.image_pruning import maybe_create_image_pruner
 from vllm.tasks import GenerationTask
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.sched.output import NewRequestData
@@ -92,6 +94,7 @@ class ModelState(ABC):
                     observability_config
                     and observability_config.enable_mm_processor_stats
                 ),
+                image_pruner=maybe_create_image_pruner(vllm_config, model),
             )
 
     @property
@@ -185,6 +188,13 @@ class ModelState(ABC):
                 scheduled_encoder_inputs.keys()
             ):
                 encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
+            if (image_pruner := self.encoder_runner.image_pruner) is not None:
+                image_pruner.prune_encoder_outputs(
+                    cast(SupportsImagePruning, self.model),
+                    mm_hashes,
+                    mm_kwargs,
+                    encoder_outputs,
+                )
             self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
 
     def gather_mm_embeddings(
